@@ -333,6 +333,126 @@ void ggml_gemv_q4_0_8x8_q8_0_generic(int n, float * GGML_RESTRICT s, size_t bs, 
     }
 }
 
+//     Key Algorithm Summary:
+//
+// Process 8 columns simultaneously for SIMD-like efficiency
+//
+// Extract packed quantization parameters using complex bit manipulation
+//
+// Compute dot products between 4-bit matrix elements and 8-bit vector elements
+//
+// Apply multiple scaling factors for proper dequantization
+//
+// Handle asymmetric quantization through minimum value corrections
+//
+// Accumulate results and store final output
+// Psuedocode for gemv_q4_K_8x8_q8_K_generic
+//     FUNCTION gemv_q4_K_8x8_q8_K_generic(n, s, bs, vx, vy, nr, nc):
+//     // Constants and initialization
+//     qk = QK_K  // quantization block size (e.g., 256)
+//     nb = n / qk  // number of blocks
+//     ncols_interleaved = 8  // process 8 columns at once
+//     blocklen = 8  // process 8 elements per iteration
+//
+//     // Bit masks for scale extraction
+//     kmask1 = 0x3f3f3f3f
+//     kmask2 = 0x0f0f0f0f
+//     kmask3 = 0x03030303
+//
+//     // Validate inputs
+//     ASSERT(n % qk == 0)  // n must be multiple of block size
+//     ASSERT(nc % ncols_interleaved == 0)  // nc must be multiple of 8
+//
+//     // Initialize accumulators
+//     DECLARE sumf[8] = {0}  // main accumulation for 8 columns
+//     DECLARE sum_minf[8] = {0}  // minimum value correction accumulation
+//     DECLARE utmp[32]  // temporary storage for unpacked scales
+//
+//     // Cast pointers to appropriate quantized block types
+//     a_ptr = (block_q8_K*) vy  // 8-bit quantized vector
+//     b_ptr_base = (block_q4_Kx8*) vx  // 4-bit quantized matrix
+//
+//     // Process in chunks of 8 columns
+//     FOR x FROM 0 TO (nc / ncols_interleaved) - 1:
+//         b_ptr = b_ptr_base + (x * nb)  // pointer to current 8-column chunk
+//
+//         // Reset accumulators for this chunk
+//         FOR j FROM 0 TO ncols_interleaved - 1:
+//             sumf[j] = 0.0
+//             sum_minf[j] = 0.0
+//
+//         // Process each quantization block
+//         FOR l FROM 0 TO nb - 1:
+//             // Phase 1: Extract and unpack quantization scales
+//             FOR sb FROM 0 TO 7:
+//                 // Copy packed scale data
+//                 COPY 12 bytes FROM b_ptr[l].scales + sb*12 TO utmp + sb*4
+//
+//                 // Bit manipulation to unpack scales
+//                 utmp[sb*4 + 3] = ((utmp[sb*4 + 2] >> 4) & kmask2) OR
+//                                  (((utmp[sb*4 + 1] >> 6) & kmask3) << 4)
+//                 uaux_0 = utmp[sb*4 + 1] & kmask1
+//                 utmp[sb*4 + 1] = (utmp[sb*4 + 2] & kmask2) OR
+//                                  (((utmp[sb*4 + 0] >> 6) & kmask3) << 4)
+//                 utmp[sb*4 + 2] = uaux_0
+//                 utmp[sb*4 + 0] = utmp[sb*4 + 0] & kmask1
+//
+//             // Phase 2: Main computation - dot product
+//             FOR k FROM 0 TO (qk / (2 * blocklen)) - 1:
+//                 // Get scale pointers for this sub-block
+//                 scales_0 = (uint8_t*)utmp + (k/4)*32
+//                 scales_1 = (uint8_t*)utmp + (k/4)*32 + 16
+//
+//                 // Process each of the 8 columns
+//                 FOR j FROM 0 TO ncols_interleaved - 1:
+//                     sumi = 0
+//
+//                     // Process 8 elements at a time
+//                     FOR i FROM 0 TO blocklen - 1:
+//                         // Extract 4-bit values (upper and lower nibbles)
+//                         idx = k * ncols_interleaved * blocklen + j * blocklen + i
+//                         v0 = (b_ptr[l].qs[idx] & 0x0F)  // lower 4 bits
+//                         v1 = (b_ptr[l].qs[idx] >> 4)    // upper 4 bits
+//
+//                         // Multiply with 8-bit weights
+//                         w_idx1 = (k >> 2) * 64 + (k % 4) * blocklen + i
+//                         w_idx2 = w_idx1 + 32
+//                         sumi1 = v0 * a_ptr[l].qs[w_idx1]
+//                         sumi2 = v1 * a_ptr[l].qs[w_idx2]
+//
+//                         // Apply scaling and accumulate
+//                         sumi1 = sumi1 * scales_0[j]
+//                         sumi2 = sumi2 * scales_1[j]
+//                         sumi = sumi + sumi1 + sumi2
+//
+//                     // Apply final scaling factors
+//                     scale_b = CONVERT_TO_FLOAT(b_ptr[l].d[j])
+//                     scale_a = a_ptr[l].d
+//                     sumf[j] = sumf[j] + sumi * scale_b * scale_a
+//
+//             // Phase 3: Minimum value correction (asymmetric quantization)
+//             FOR sb FROM 0 TO 7:
+//                 mins = (uint8_t*)utmp + 8 + sb*16  // minimum values
+//                 FOR j FROM 0 TO ncols_interleaved - 1:
+//                     // Calculate correction term
+//                     bsum = a_ptr[l].bsums[sb*2] + a_ptr[l].bsums[sb*2 + 1]
+//                     dmin = CONVERT_TO_FLOAT(b_ptr[l].dmin[j])
+//                     correction = mins[j] * bsum * dmin * a_ptr[l].d
+//                     sum_minf[j] = sum_minf[j] + correction
+//
+//         // Phase 4: Store final results for this 8-column chunk
+//         FOR j FROM 0 TO ncols_interleaved - 1:
+//             s[x * ncols_interleaved + j] = sumf[j] - sum_minf[j]
+// END FUNCTION
+    //     GEMV(
+    //         n -  ne00,                           // number of columns
+    //         s -  dst_data + (remaining_row * nb1) + start_row,  // output position
+    //         bs - ne01,                           // total rows in src0
+    //         vx - src0_data + start_row * nb01,   // input A starting position
+    //         vy - quantized_src1 + (quantized_col_stride * remaining_row),  // input B row
+    //         nr - 1,                              // single row operation
+    //         nc - end_row - start_row             // number of rows this thread processes
+    //     )
 void ggml_gemv_q4_K_8x8_q8_K_generic(int n, float * GGML_RESTRICT s, size_t bs, const void * GGML_RESTRICT vx, const void * GGML_RESTRICT vy, int nr, int nc) {
     const int qk = QK_K;
     const int nb = n / qk;
@@ -1501,6 +1621,15 @@ template <> void gemv<block_q4_0, 8, 8, GGML_TYPE_Q8_0>(int n, float * s, size_t
     ggml_gemv_q4_0_8x8_q8_0(n, s, bs, vx, vy, nr, nc);
 }
 
+//     GEMV(
+//         n -  ne00,                           // number of columns
+//         s -  dst_data + (remaining_row * nb1) + start_row,  // output position
+//         bs - ne01,                           // total rows in src0
+//         vx - src0_data + start_row * nb01,   // input A starting position
+//         vy - quantized_src1 + (quantized_col_stride * remaining_row),  // input B row
+//         nr - 1,                              // single row operation
+//         nc - end_row - start_row             // number of rows this thread processes
+//     )
 template <> void gemv<block_q4_K, 8, 8, GGML_TYPE_Q8_K>(int n, float * s, size_t bs, const void * vx, const void * vy, int nr, int nc) {
     ggml_gemv_q4_K_8x8_q8_K(n, s, bs, vx, vy, nr, nc);
 }
@@ -1605,10 +1734,38 @@ template <typename BLOC_TYPE, int64_t INTER_SIZE, int64_t NB_COLS, ggml_type PAR
         const ggml_tensor * src1 = op->src[1];
         ggml_tensor *       dst  = op;
 
-        GGML_TENSOR_BINARY_OP_LOCALS
+        const int64_t ne00 = (src0)->ne[0]; (void)(ne00);
+        const int64_t ne01 = (src0)->ne[1]; (void)(ne01);
+        const int64_t ne02 = (src0)->ne[2]; (void)(ne02);
+        const int64_t ne03 = (src0)->ne[3]; (void)(ne03);
 
-        const int ith = params->ith;
-        const int nth = params->nth;
+        const size_t nb00 = (src0)->nb[0];  (void)(nb00);
+        const size_t nb01 = (src0)->nb[1];  (void)(nb01);
+        const size_t nb02 = (src0)->nb[2];  (void)(nb02);
+        const size_t nb03 = (src0)->nb[3];  (void)(nb03);
+
+        const int64_t ne10 = (src1)->ne[0]; (void)(ne10);
+        const int64_t ne11 = (src1)->ne[1]; (void)(ne11);
+        const int64_t ne12 = (src1)->ne[2]; (void)(ne12);
+        const int64_t ne13 = (src1)->ne[3]; (void)(ne13);
+
+        const size_t nb10 = (src1)->nb[0];  (void)(nb10);
+        const size_t nb11 = (src1)->nb[1];  (void)(nb11);
+        const size_t nb12 = (src1)->nb[2];  (void)(nb12);
+        const size_t nb13 = (src1)->nb[3];  (void)(nb13);
+
+        const int64_t ne0 = (dst)->ne[0];   (void)(ne0);
+        const int64_t ne1 = (dst)->ne[1];   (void)(ne1);
+        const int64_t ne2 = (dst)->ne[2];   (void)(ne2);
+        const int64_t ne3 = (dst)->ne[3];   (void)(ne3);
+
+        const size_t nb0  = (dst)->nb[0];   (void)(nb0);
+        const size_t nb1  = (dst)->nb[1];   (void)(nb1);
+        const size_t nb2  = (dst)->nb[2];   (void)(nb2);
+        const size_t nb3  = (dst)->nb[3];   (void)(nb3);
+
+        const int ith = params->ith;    // current thread index
+        const int nth = params->nth;    // total number of threads
 
         GGML_ASSERT(ne0 == ne01);
         GGML_ASSERT(ne1 == ne11);
@@ -1616,16 +1773,18 @@ template <typename BLOC_TYPE, int64_t INTER_SIZE, int64_t NB_COLS, ggml_type PAR
         GGML_ASSERT(ne3 == ne13);
 
         // dst cannot be transposed or permuted
-        GGML_ASSERT(nb0 == sizeof(float));
-        GGML_ASSERT(nb0 <= nb1);
+        GGML_ASSERT(nb0 == sizeof(float));  // dst elements are contiguous floats
+        GGML_ASSERT(nb0 <= nb1);            // ASSERT(nb0 <= nb1 <= nb2 <= nb3), i.e. memory layout is properly ordered
         GGML_ASSERT(nb1 <= nb2);
         GGML_ASSERT(nb2 <= nb3);
 
         GGML_ASSERT(src1->type == GGML_TYPE_F32);
 
+        // Validate input types
         GGML_ASSERT(ggml_n_dims(op->src[0]) == 2);
         // GGML_ASSERT(ggml_n_dims(op->src[1]) == 2);
 
+        // Prepare working memory for quantization
         char *       wdata = static_cast<char *>(params->wdata);
         const size_t nbw1  = ggml_row_size(PARAM_TYPE, ne10);
 
@@ -1633,35 +1792,71 @@ template <typename BLOC_TYPE, int64_t INTER_SIZE, int64_t NB_COLS, ggml_type PAR
 
         const ggml_from_float_t from_float = ggml_get_type_traits_cpu(PARAM_TYPE)->from_float;
 
+        // Phase 1: Quantize src1 matrix in parallel (process 4 rows at a time)
         int64_t i11_processed = 0;
         for (int64_t i11 = ith * 4; i11 < ne11 - ne11 % 4; i11 += nth * 4) {
-            ggml_quantize_mat_t<INTER_SIZE, PARAM_TYPE>((float *) ((char *) src1->data + i11 * nb11), (void *) (wdata + i11 * nbw1), 4, ne10);
+            ggml_quantize_mat_t<INTER_SIZE,
+            PARAM_TYPE>((float *) ((char *) src1->data + i11 * nb11),
+                (void *) (wdata + i11 * nbw1), 4, ne10);
         }
 
+        // Phase 2: Process remaining rows (not multiples of 4)
         i11_processed = ne11 - ne11 % 4;
         for (int64_t i11 = i11_processed + ith; i11 < ne11; i11 += nth) {
             from_float((float *) ((char *) src1->data + i11 * nb11), (void *) (wdata + i11 * nbw1), ne10);
         }
 
+        // Wait for all threads to finish quantization
         ggml_barrier(params->threadpool);
 
+        // Prepare for matrix multiplication
         const void * src1_wdata      = params->wdata;
         const size_t src1_col_stride = ggml_row_size(PARAM_TYPE, ne10);
-        int64_t      src0_start      = (ith * ne01) / nth;
-        int64_t      src0_end        = ((ith + 1) * ne01) / nth;
+
+        // Calculate work distribution for this thread
+        int64_t      src0_start      = (ith * ne01) / nth;              // starting row in src0 for this thread
+        int64_t      src0_end        = ((ith + 1) * ne01) / nth;        // ending row in src0 for this thread
+
+        // Align to column boundary for optimization
         src0_start = (src0_start % NB_COLS) ? src0_start + NB_COLS - (src0_start % NB_COLS) : src0_start;
         src0_end   = (src0_end   % NB_COLS) ? src0_end   + NB_COLS - (src0_end   % NB_COLS) : src0_end;
+
+        // exit thread, no work for this thread
         if (src0_start >= src0_end) {
             return;
         }
 
+        // Phase 3: Matrix multiplication
+        // IF ne11 > 3:  // Use GEMM for larger matrices
         // If there are more than three rows in src1, use gemm; otherwise, use gemv.
+        //         GEMM(
+        //              ne00,                           // number of columns
+        //              dst_data + start_row,           // output starting position
+        //              ne01,                           // total rows in src0
+        //              src0_data + start_row * nb01,   // input A starting position
+        //              quantized_src1,                 // quantized input B
+        //              ne11 - ne11 % 4,                // number of rows to process (aligned)
+        //              end_row - start_row             // number of rows this thread processes
+        //          )
+
         if (ne11 > 3) {
             gemm<BLOC_TYPE, INTER_SIZE, NB_COLS, PARAM_TYPE>(ne00,
                     (float *) ((char *) dst->data) + src0_start, ne01,
                     (const char *) src0->data + src0_start * nb01,
                     (const char *) src1_wdata, ne11 - ne11 % 4, src0_end - src0_start);
         }
+
+        // Phase 4: Process remaining rows with GEMV
+        // FOR remaining_row FROM (ne11 - ne11 % 4) TO ne11:
+        //     GEMV(
+        //         ne00,                           // number of columns
+        //         dst_data + (remaining_row * nb1) + start_row,  // output position
+        //         ne01,                           // total rows in src0
+        //         src0_data + start_row * nb01,   // input A starting position
+        //         quantized_src1 + (quantized_col_stride * remaining_row),  // input B row
+        //         1,                              // single row operation
+        //         end_row - start_row             // number of rows this thread processes
+        //     )
         for (int iter = ne11 - ne11 % 4; iter < ne11; iter++) {
             gemv<BLOC_TYPE, INTER_SIZE, NB_COLS, PARAM_TYPE>(ne00,
                     (float *) ((char *) dst->data + (iter * nb1)) + src0_start, ne01,

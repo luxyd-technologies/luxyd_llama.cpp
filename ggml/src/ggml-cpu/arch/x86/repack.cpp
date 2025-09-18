@@ -1389,7 +1389,17 @@ void ggml_gemv_q4_0_8x8_q8_0(int n, float * GGML_RESTRICT s, size_t bs, const vo
     ggml_gemv_q4_0_8x8_q8_0_generic(n, s, bs, vx, vy, nr, nc);
 }
 
-void ggml_gemv_q4_K_8x8_q8_K(int n, float * GGML_RESTRICT s, size_t bs, const void * GGML_RESTRICT vx, const void * GGML_RESTRICT vy, int nr, int nc) {
+//     GEMV(
+//         n -  ne00,                           // number of columns
+//         s -  dst_data + (remaining_row * nb1) + start_row,  // output position
+//         bs - ne01,                           // total rows in src0
+//         vx - src0_data + start_row * nb01,   // input A starting position
+//         vy - quantized_src1 + (quantized_col_stride * remaining_row),  // input B row
+//         nr - 1,                              // single row operation
+//         nc - end_row - start_row             // number of rows this thread processes
+//     )
+void luxyd_ggml_gemv_q4_K_8x8_q8_K(int n, float * GGML_RESTRICT s, size_t bs, const void * GGML_RESTRICT vx, const void * GGML_RESTRICT vy, int nr, int nc) {
+
     const int qk = QK_K;
     const int nb = n / qk;
     const int ncols_interleaved = 8;
@@ -1610,6 +1620,10 @@ void ggml_gemv_q4_K_8x8_q8_K(int n, float * GGML_RESTRICT s, size_t bs, const vo
     UNUSED(kmask3);
     ggml_gemv_q4_K_8x8_q8_K_generic(n, s, bs, vx, vy, nr, nc);
 #endif
+}
+
+void ggml_gemv_q4_K_8x8_q8_K(int n, float * GGML_RESTRICT s, size_t bs, const void * GGML_RESTRICT vx, const void * GGML_RESTRICT vy, int nr, int nc) {
+    luxyd_ggml_gemv_q4_K_8x8_q8_K(n,s, bs, vx, vy, nr, nc);
 }
 
 void ggml_gemv_iq4_nl_8x8_q8_0(int n, float * GGML_RESTRICT s, size_t bs, const void * GGML_RESTRICT vx, const void * GGML_RESTRICT vy, int nr, int nc) {
