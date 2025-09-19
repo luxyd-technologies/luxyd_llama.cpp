@@ -454,10 +454,12 @@ void ggml_gemv_q4_0_8x8_q8_0_generic(int n, float * GGML_RESTRICT s, size_t bs, 
     //         nc - end_row - start_row             // number of rows this thread processes
     //     )
 void ggml_gemv_q4_K_8x8_q8_K_generic(int n, float * GGML_RESTRICT s, size_t bs, const void * GGML_RESTRICT vx, const void * GGML_RESTRICT vy, int nr, int nc) {
-    const int qk = QK_K;
-    const int nb = n / qk;
-    const int ncols_interleaved = 8;
-    const int blocklen = 8;
+
+    const int qk = QK_K;                // (quantization block size) default = 256
+    const int nb = n / qk;              // number of blocks
+    const int ncols_interleaved = 8;    // number of columns processes in parallel
+    const int blocklen = 8;             // number of elements per processing block
+
     static const uint32_t kmask1 = 0x3f3f3f3f;
     static const uint32_t kmask2 = 0x0f0f0f0f;
     static const uint32_t kmask3 = 0x03030303;
@@ -482,9 +484,19 @@ void ggml_gemv_q4_K_8x8_q8_K_generic(int n, float * GGML_RESTRICT s, size_t bs, 
     int sumi2;
     int sumi;
 
+    // typedef struct {
+    //     float   d;              // delta
+    //     int8_t  qs[QK_K];       // quants. QK_K = 256
+    //     int16_t bsums[QK_K/16]; // sum of quants in groups of 16
+    // } block_q8_K;
+
+  // a_ptr = vy as block_q8_K* (8-bit quantized vector)
+  // b_ptr = vx as block_q4_Kx8* (4-bit quantized matrix)
+
     const block_q8_K * a_ptr = (const block_q8_K *) vy;
+    // process in chunks of 8 columns, e,g nc = 256, nc/8 = 32 iterations
     for (int x = 0; x < nc / ncols_interleaved; x++) {
-        const block_q4_Kx8 * b_ptr = (const block_q4_Kx8 *) vx + (x * nb);
+        const block_q4_Kx8 * b_ptr = (const block_q4_Kx8 *) vx + (x * nb); // iterate through blocks
 
         for (int j = 0; j < ncols_interleaved; j++) {
             sumf[j] = 0.0;

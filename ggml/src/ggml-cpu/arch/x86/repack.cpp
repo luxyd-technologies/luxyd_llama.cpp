@@ -15,6 +15,74 @@
 #include <cstdlib> // for qsort
 #include <cstdio>  // for GGML_ASSERT
 
+
+// logger
+
+#include <iostream>
+#include <fstream>
+#include <string>
+#include <chrono>
+#include <iomanip>
+
+enum class LogLevel {
+    INFO,
+    WARNING,
+    ERROR
+};
+
+class Logger {
+private:
+    std::ofstream fileStream;
+    bool logToFile;
+    bool logToConsole;
+
+    std::string getCurrentTime() {
+        auto now = std::chrono::system_clock::now();
+        auto time = std::chrono::system_clock::to_time_t(now);
+        char buffer[20];
+        std::strftime(buffer, sizeof(buffer), "%Y-%m-%d %H:%M:%S", std::localtime(&time));
+        return std::string(buffer);
+    }
+
+    std::string levelToString(LogLevel level) {
+        switch (level) {
+            case LogLevel::INFO: return "INFO";
+            case LogLevel::WARNING: return "WARNING";
+            case LogLevel::ERROR: return "ERROR";
+            default: return "UNKNOWN";
+        }
+    }
+
+public:
+    Logger(const std::string& filename = "", bool console = true)
+        : logToConsole(console), logToFile(!filename.empty()) {
+        if (logToFile) {
+            fileStream.open(filename, std::ios::app);
+        }
+    }
+
+    ~Logger() {
+        if (fileStream.is_open()) {
+            fileStream.close();
+        }
+    }
+
+    void log(const std::string& message, LogLevel level = LogLevel::INFO) {
+        std::string timestamp = getCurrentTime();
+        std::string levelStr = levelToString(level);
+        std::string logEntry = "[" + timestamp + "] [" + levelStr + "] " + message;
+
+        // if (logToConsole) {
+        //     std::cout << logEntry << std::endl;
+        // }
+
+        if (logToFile && fileStream.is_open()) {
+            fileStream << logEntry << std::endl;
+        }
+    }
+};
+
+// end logger
 #define GGML_CPU_CLANG_WORKAROUND
 #include "../../repack.h"
 
@@ -1408,6 +1476,15 @@ void luxyd_ggml_gemv_q4_K_8x8_q8_K(int n, float * GGML_RESTRICT s, size_t bs, co
     static const uint32_t kmask2 = 0x0f0f0f0f;
     static const uint32_t kmask3 = 0x03030303;
 
+
+    Logger* logger;
+    logger = new Logger(("application.log"));
+    char buffer[128];
+    sprintf(buffer, "n:%d\tsize of s:%ld\tsize of vx:%ld\t size of vy%ld\t nr:%d\t nc:%d\n",
+        n, sizeof(s), sizeof(vx), sizeof(vy), nr, nc);
+    logger->log(buffer );
+    logger->~Logger();
+
     assert (n % qk == 0);
     assert (nc % ncols_interleaved == 0);
 
@@ -1624,6 +1701,7 @@ void luxyd_ggml_gemv_q4_K_8x8_q8_K(int n, float * GGML_RESTRICT s, size_t bs, co
 
 void ggml_gemv_q4_K_8x8_q8_K(int n, float * GGML_RESTRICT s, size_t bs, const void * GGML_RESTRICT vx, const void * GGML_RESTRICT vy, int nr, int nc) {
     luxyd_ggml_gemv_q4_K_8x8_q8_K(n,s, bs, vx, vy, nr, nc);
+    // ggml_gemv_q4_K_8x8_q8_K_generic(n, s, bs, vx, vy, nr, nc);
 }
 
 void ggml_gemv_iq4_nl_8x8_q8_0(int n, float * GGML_RESTRICT s, size_t bs, const void * GGML_RESTRICT vx, const void * GGML_RESTRICT vy, int nr, int nc) {
