@@ -21,6 +21,12 @@
 #if defined(__GNUC__)
 #pragma GCC diagnostic ignored "-Woverlength-strings"
 #endif
+#include <fstream>
+#include <iostream>
+#include <string>
+#include <atomic>
+#include <thread>
+#include <sstream>
 
 #define UNUSED GGML_UNUSED
 
@@ -333,6 +339,22 @@ void ggml_gemv_q4_0_8x8_q8_0_generic(int n, float * GGML_RESTRICT s, size_t bs, 
     }
 }
 
+// // This is only used for intermediate quantization and dot products
+// typedef struct {
+//     float   d;              // delta
+//     int8_t  qs[QK_K];       // quants
+//     int16_t bsums[QK_K/16]; // sum of quants in groups of 16
+// } block_q8_K;
+
+// struct block_q4_Kx8 {
+//     ggml_half d[8];      // super-block scale for quantized scales
+//     ggml_half dmin[8];   // super-block scale for quantized mins
+//     uint8_t scales[96];  // scales and mins, quantized with 6 bits
+//     uint8_t qs[1024];    // 4--bit quants
+// };
+
+
+
 void ggml_gemv_q4_K_8x8_q8_K_generic(int n, float * GGML_RESTRICT s, size_t bs, const void * GGML_RESTRICT vx, const void * GGML_RESTRICT vy, int nr, int nc) {
     const int qk = QK_K;
     const int nb = n / qk;
@@ -344,6 +366,101 @@ void ggml_gemv_q4_K_8x8_q8_K_generic(int n, float * GGML_RESTRICT s, size_t bs, 
 
     assert (n % qk == 0);
     assert (nc % ncols_interleaved == 0);
+
+    // Thread-safe counter using atomic operations
+    static std::atomic<int> dump_counter{0};
+    const int current_dump_id = dump_counter.fetch_add(1);
+    const bool enable_dump = (current_dump_id < 5); // Only dump first 5 calls to avoid too many files
+
+    // Create unique postfix using thread ID and atomic counter
+    std::stringstream ss;
+    ss << std::this_thread::get_id() << "_" << current_dump_id;
+    std::string dump_postfix = ss.str();
+
+    
+    if (enable_dump) {
+        char filename[256];
+        
+        // Dump input parameters to text file
+        snprintf(filename, sizeof(filename), "debug_q4K_8x8_q8K_params_%s.txt", dump_postfix.c_str());
+        std::ofstream param_file(filename);
+        param_file << "n=" << n << std::endl;
+        param_file << "bs=" << bs << std::endl;
+        param_file << "nr=" << nr << std::endl;
+        param_file << "nc=" << nc << std::endl;
+        param_file << "qk=" << qk << std::endl;
+        param_file << "nb=" << nb << std::endl;
+        param_file << "ncols_interleaved=" << ncols_interleaved << std::endl;
+        param_file << "blocklen=" << blocklen << std::endl;
+        param_file.close();
+        
+        // Dump vx (block_q4_Kx8) binary data
+        snprintf(filename, sizeof(filename), "debug_q4K_8x8_vx_%s.bin", dump_postfix.c_str());
+        std::ofstream vx_file(filename, std::ios::binary);
+        const size_t vx_size = nb * sizeof(block_q4_Kx8);
+        vx_file.write(static_cast<const char*>(vx), vx_size);
+        vx_file.close();
+        
+        // Dump vx structure details to text
+        snprintf(filename, sizeof(filename), "debug_q4K_8x8_vx_%s.txt", dump_postfix.c_str());
+        std::ofstream vx_txt(filename);
+        const block_q4_Kx8 * vx_blocks = static_cast<const block_q4_Kx8*>(vx);
+        vx_txt << "vx_size=" << vx_size << " bytes" << std::endl;
+        vx_txt << "num_blocks=" << nb << std::endl;
+        for (int i = 0; i < std::min(nb, 3); i++) { // Only dump first 3 blocks
+            vx_txt << "Block[" << i << "]:" << std::endl;
+            vx_txt << "  d[0-7]: ";
+            for (int j = 0; j < 8; j++) {
+                vx_txt << GGML_CPU_FP16_TO_FP32(vx_blocks[i].d[j]) << " ";
+            }
+            vx_txt << std::endl;
+            vx_txt << "  dmin[0-7]: ";
+            for (int j = 0; j < 8; j++) {
+                vx_txt << GGML_CPU_FP16_TO_FP32(vx_blocks[i].dmin[j]) << " ";
+            }
+            vx_txt << std::endl;
+            vx_txt << "  first 32 scales: ";
+            for (int j = 0; j < 32; j++) {
+                vx_txt << (int)vx_blocks[i].scales[j] << " ";
+            }
+            vx_txt << std::endl;
+            vx_txt << "  first 32 qs: ";
+            for (int j = 0; j < 32; j++) {
+                vx_txt << (int)vx_blocks[i].qs[j] << " ";
+            }
+            vx_txt << std::endl;
+        }
+        vx_txt.close();
+        
+        // Dump vy (block_q8_K) binary data
+        snprintf(filename, sizeof(filename), "debug_q4K_8x8_vy_%s.bin", dump_postfix.c_str());
+        std::ofstream vy_file(filename, std::ios::binary);
+        const size_t vy_size = nb * sizeof(block_q8_K);
+        vy_file.write(static_cast<const char*>(vy), vy_size);
+        vy_file.close();
+        
+        // Dump vy structure details to text
+        snprintf(filename, sizeof(filename), "debug_q4K_8x8_vy_%s.txt", dump_postfix.c_str());
+        std::ofstream vy_txt(filename);
+        const block_q8_K * vy_blocks = static_cast<const block_q8_K*>(vy);
+        vy_txt << "vy_size=" << vy_size << " bytes" << std::endl;
+        vy_txt << "num_blocks=" << nb << std::endl;
+        for (int i = 0; i < std::min(nb, 3); i++) { // Only dump first 3 blocks
+            vy_txt << "Block[" << i << "]:" << std::endl;
+            vy_txt << "  d: " << vy_blocks[i].d << std::endl;
+            vy_txt << "  first 32 qs: ";
+            for (int j = 0; j < 32; j++) {
+                vy_txt << (int)vy_blocks[i].qs[j] << " ";
+            }
+            vy_txt << std::endl;
+            vy_txt << "  first 16 bsums: ";
+            for (int j = 0; j < 16; j++) {
+                vy_txt << vy_blocks[i].bsums[j] << " ";
+            }
+            vy_txt << std::endl;
+        }
+        vy_txt.close();
+    }
 
     UNUSED(s);
     UNUSED(bs);
@@ -408,6 +525,31 @@ void ggml_gemv_q4_K_8x8_q8_K_generic(int n, float * GGML_RESTRICT s, size_t bs, 
         for (int j = 0; j < ncols_interleaved; j++) {
             s[x * ncols_interleaved + j] = sumf[j] - sum_minf[j];
         }
+    }
+    
+    // Dump output results
+    if (enable_dump) {
+        char filename[256];
+        
+        // Dump output s array to binary file
+        snprintf(filename, sizeof(filename), "debug_q4K_8x8_output_%s.bin", dump_postfix.c_str());
+        std::ofstream out_file(filename, std::ios::binary);
+        out_file.write(reinterpret_cast<const char*>(s), nc * sizeof(float));
+        out_file.close();
+        
+        // Dump output s array to text file
+        snprintf(filename, sizeof(filename), "debug_q4K_8x8_output_%s.txt", dump_postfix.c_str());
+        std::ofstream out_txt(filename);
+        out_txt << "output_size=" << nc << " floats (" << (nc * sizeof(float)) << " bytes)" << std::endl;
+        out_txt << "output_values: ";
+        for (int i = 0; i < nc; i++) {
+            out_txt << s[i];
+            if (i < nc - 1) out_txt << " ";
+        }
+        out_txt << std::endl;
+        out_txt.close();
+        
+        std::cout << "Debug dump " << current_dump_id << " with thread ID " << std::this_thread::get_id() << " completed for ggml_gemv_q4_K_8x8_q8_K_generic" << std::endl;
     }
 }
 

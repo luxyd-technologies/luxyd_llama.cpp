@@ -1,0 +1,8 @@
+n=4096
+bs=4096
+nr=1
+nc=1024
+qk=256
+nb=16
+ncols_interleaved=8
+blocklen=8
