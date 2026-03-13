@@ -7999,7 +7999,11 @@ static std::vector<std::unique_ptr<test_case>> make_test_cases_eval() {
 
 #if 1
     for (ggml_type type_a : base_types) {
-        for (ggml_type type_b : {GGML_TYPE_F32, GGML_TYPE_F16}) {
+        std::vector<ggml_type> types_b = {GGML_TYPE_F32, GGML_TYPE_F16};
+        if (type_a == GGML_TYPE_Q4_K) {
+            types_b.push_back(GGML_TYPE_Q8_K);
+        }
+        for (ggml_type type_b : types_b) {
             std::vector<int> ks = { 256 };
             if (ggml_blck_size(type_a) == 1) {
                 ks.push_back(4);
@@ -8187,7 +8191,11 @@ static std::vector<std::unique_ptr<test_case>> make_test_cases_eval() {
     }
 
     for (ggml_type type_a : base_types) {
-        for (ggml_type type_b : {GGML_TYPE_F32, GGML_TYPE_F16}) {
+        std::vector<ggml_type> types_b = {GGML_TYPE_F32, GGML_TYPE_F16};
+        if (type_a == GGML_TYPE_Q4_K) {
+            types_b.push_back(GGML_TYPE_Q8_K);
+        }
+        for (ggml_type type_b : types_b) {
             for (int n : {1, 16}) {
                 for (int k : {1, 16}) {
                     for (int bs2 : {1, 3}) {

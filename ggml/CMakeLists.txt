@@ -302,7 +302,9 @@ if (GGML_BUILD_TESTS)
 endif ()
 
 if (GGML_BUILD_EXAMPLES)
-    add_subdirectory(examples)
+    if(GGML_BUILD_EXAMPLES AND EXISTS "${CMAKE_CURRENT_SOURCE_DIR}/examples")
+        add_subdirectory(examples)
+    endif()
 endif ()
 
 #

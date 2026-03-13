@@ -35,6 +35,8 @@ else()
     add_subdirectory(gen-docs)
     add_subdirectory(training)
     add_subdirectory(diffusion)
+    add_executable(llama-fpga-benchmark fpga-benchmark.cpp)
+    target_link_libraries(llama-fpga-benchmark PRIVATE common ggml llama)
     if (NOT GGML_BACKEND_DL)
         add_subdirectory(convert-llama2c-to-ggml)
         # these examples use the backends directly and cannot be built with dynamic loading
