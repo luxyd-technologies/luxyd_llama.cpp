@@ -15,8 +15,10 @@
 #include <cstring>
 #include <cassert>
 #include <cstdio>  // for GGML_ASSERT
+#include <cstdlib> // for std::getenv
 
 #include "repack.h"
+#include "ggml-fpga.h"
 
 #if defined(__GNUC__)
 #pragma GCC diagnostic ignored "-Woverlength-strings"
@@ -955,6 +957,7 @@ void ggml_gemv_q4_K_8x4_q8_K_generic(int n, float * GGML_RESTRICT s, size_t bs, 
     }
 }
 
+extern "C" {
 void ggml_gemv_q4_K_8x8_q8_K_generic(int n, float * GGML_RESTRICT s, size_t bs, const void * GGML_RESTRICT vx, const void * GGML_RESTRICT vy, int nr, int nc) {
     const int qk = QK_K;
     const int nb = n / qk;
@@ -1025,6 +1028,7 @@ void ggml_gemv_q4_K_8x8_q8_K_generic(int n, float * GGML_RESTRICT s, size_t bs, 
         }
     }
 }
+} // extern "C"
 
 void ggml_gemv_q2_K_8x8_q8_K_generic(int n, float * GGML_RESTRICT s, size_t bs, const void * GGML_RESTRICT vx, const void * GGML_RESTRICT vy, int nr, int nc) {
     const int qk = QK_K;
@@ -3981,11 +3985,15 @@ void gemv<block_q2_K, 8, 8, GGML_TYPE_Q8_K>(int          n,
 }
 
 template <> void gemv<block_q4_K, 4, 8, GGML_TYPE_Q8_K>(int n, float * s, size_t bs, const void * vx, const void * vy, int nr, int nc) {
-    ggml_gemv_q4_K_8x4_q8_K(n, s, bs, vx, vy, nr, nc);
+    if (!ggml_fpga_gemv_q4_K_8x8_q8_K(n, s, bs, vx, vy, nr, nc)) {
+        ggml_gemv_q4_K_8x4_q8_K(n, s, bs, vx, vy, nr, nc);
+    }
 }
 
 template <> void gemv<block_q4_K, 8, 8, GGML_TYPE_Q8_K>(int n, float * s, size_t bs, const void * vx, const void * vy, int nr, int nc) {
-    ggml_gemv_q4_K_8x8_q8_K(n, s, bs, vx, vy, nr, nc);
+    if (!ggml_fpga_gemv_q4_K_8x8_q8_K(n, s, bs, vx, vy, nr, nc)) {
+        ggml_gemv_q4_K_8x8_q8_K(n, s, bs, vx, vy, nr, nc);
+    }
 }
 
 template <> void gemv<block_q5_K, 4, 8, GGML_TYPE_Q8_K>(int n, float * s, size_t bs, const void * vx, const void * vy, int nr, int nc) {
@@ -4595,6 +4603,12 @@ static const ggml::cpu::tensor_traits * ggml_repack_get_optimal_repack_type(cons
             #endif
         }
     } else if (cur->type == GGML_TYPE_Q4_K) {
+        const char * fpga_env = std::getenv("GGML_FPGA_OFFLOAD");
+        if (fpga_env && strcmp(fpga_env, "1") == 0) {
+            if (cur->ne[1] % 8 == 0) {
+                return &q4_K_8x8_q8_K;
+            }
+        }
         if (ggml_cpu_has_avx2()) {
             if (cur->ne[1] % 8 == 0) {
                 return &q4_K_8x8_q8_K;
